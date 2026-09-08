@@ -169,6 +169,8 @@ export function validateState(input) {
       if (v.keys(o.answers, Object.keys(freshState().onboarding.answers), 'Answers')) for (const [k, value] of Object.entries(o.answers)) v.str(value, k === 'name' ? 60 : k === 'time' ? 100 : 500, 'Answer', true, false);
       v.check(Array.isArray(o.scheduledDays) && o.scheduledDays.length <= 7 && new Set(o.scheduledDays).size === o.scheduledDays.length && o.scheduledDays.every(d => Number.isInteger(d) && d >= 0 && d <= 6), 'Choose valid scheduled days.');
       if (o.approved && Array.isArray(o.scheduledDays) && object(o.answers)) v.check(planComplete(o) && !safetyConcern(JSON.stringify(approvedPlan(o))), 'An approved Goal Plan must be complete and safe to track.');
+      if (['review', 'handoff', 'import', 'tracker'].includes(o.stage)) v.check(Array.isArray(o.scheduledDays) && object(o.answers) && planComplete(o), 'Complete your Goal Plan before continuing.');
+      if (['handoff', 'import', 'tracker'].includes(o.stage)) v.check(o.approved === true, 'Approve your Goal Plan before using AI or saving a tracker.');
     }
     if (s.trackerConfig !== null) validateConfig(s.trackerConfig);
     v.check(s.onboarding?.stage !== 'tracker' || s.trackerConfig !== null, 'The tracker screen needs a saved setup.');
@@ -227,9 +229,13 @@ export function calculate(s, now = new Date()) {
   }
   return { todayRows, todayPoints: todayRows.reduce((n, e) => n + e.points, 0), weekRows, weekPoints: weekRows.reduce((n, e) => n + e.points, 0), weekDays: new Set(weekRows.map(e => e.localDate)).size, totalPoints: rows.reduce((n, e) => n + e.points, 0), daysWorked: counts.size, currentStreak: current, bestStreak: best, weekStart };
 }
-export function makeBackup(s) { return JSON.stringify({ backupVersion: 1, state: validateState(s) }, null, 2); }
+export function makeBackup(s) {
+  const text = JSON.stringify({ backupVersion: 1, state: validateState(s) });
+  if (new TextEncoder().encode(text).length > MAX_BACKUP) throw new StorageError('This backup is too large. Keep the original saved data for recovery.');
+  return text;
+}
 export function parseBackup(text) {
-  if (typeof text !== 'string' || text.length > MAX_BACKUP) throw new ValidationError(['Choose a Goal Tracker backup smaller than 8 MB.']);
+  if (typeof text !== 'string' || text.length > MAX_BACKUP || new TextEncoder().encode(text).length > MAX_BACKUP) throw new ValidationError(['Choose a Goal Tracker backup smaller than 8 MB.']);
   let data;
   try { data = JSON.parse(text); } catch { throw new ValidationError(['This file is not a readable Goal Tracker backup.']); }
   if (!object(data) || data.backupVersion !== 1 || !Object.hasOwn(data, 'state') || Object.keys(data).length !== 2) throw new ValidationError(['Choose a supported Goal Tracker backup.']);
@@ -248,7 +254,7 @@ export class LocalStore {
       if (expectedRaw !== undefined && before !== expectedRaw) throw new StorageError('Your tracker changed in another tab. Review it again before replacing it.');
       const next = validateState(update(expectedRaw !== undefined ? null : this.read()));
       const serialized = JSON.stringify(next);
-      if (serialized.length > MAX_BACKUP) throw new StorageError('This tracker is full. Save a backup before starting another tracker.');
+      if (new TextEncoder().encode(JSON.stringify({ backupVersion: 1, state: next })).length > MAX_BACKUP) throw new StorageError('This tracker is full. Save a backup before starting another tracker.');
       try { this.storage.setItem(STORAGE_KEY, serialized); } catch { throw new StorageError('Could not save on this device. Your previous saved tracker is unchanged. Free some browser storage, then try again.'); }
       return next;
     };

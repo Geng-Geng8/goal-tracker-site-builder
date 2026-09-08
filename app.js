@@ -57,6 +57,7 @@ function applyTheme(c) {
   document.documentElement.dataset.feel = c?.style.feel || 'calm';
 }
 function render(focus = true) {
+  clearTimeout(toastTimer); $('toast').classList.remove('show');
   main.replaceChildren();
   applyTheme(preview || state?.trackerConfig);
   document.title = state?.trackerConfig?.appName || 'Universal Goal Tracker';
@@ -206,7 +207,7 @@ function tracker() {
   if (state.preferences.activeTab === 'today') {
     const box = card(); box.append(el('h2', "Today's progress"));
     para(`${data.todayRows.length} of ${c.dailyTarget} actions`, box); progress(data.todayRows.length, c.dailyTarget, "Today's action target", box);
-    const stats = el('div', undefined, 'metric-grid'); stat(c.pointsName, data.todayPoints, stats); stat(c.streakName, `${data.currentStreak} scheduled days`, stats); stat('Actions today', data.todayRows.length, stats); box.append(stats);
+    const stats = el('div', undefined, 'metric-grid'); stat(c.pointsName, data.todayPoints, stats); stat(c.streakName, `${data.currentStreak} scheduled day${data.currentStreak === 1 ? '' : 's'}`, stats); stat('Actions today', data.todayRows.length, stats); box.append(stats);
     para(data.todayRows.length >= c.dailyTarget ? 'Your action target is met. Make time for rest, too.' : c.scheduledDays.includes(new Date().getDay()) ? 'New day. You can start again.' : 'A rest day. Any action today is optional.', box);
     main.append(el('h2', 'What have you done today?'));
     para('Tap after you complete the action. Each action counts once per day.');
@@ -221,7 +222,7 @@ function tracker() {
     }); main.append(grid);
   } else if (state.preferences.activeTab === 'week') {
     const box = card(); box.append(el('h2', 'This week')); para('Monday through Sunday. A worked day means at least one useful action.', box);
-    para(`${data.weekDays} days worked · target ${c.daysPerWeek} days`, box); progress(data.weekDays, c.daysPerWeek, 'Days worked toward weekly target', box);
+    para(`${data.weekDays} day${data.weekDays === 1 ? '' : 's'} worked · target ${c.daysPerWeek} day${c.daysPerWeek === 1 ? '' : 's'}`, box); progress(data.weekDays, c.daysPerWeek, 'Days worked toward weekly target', box);
     const stats = el('div', undefined, 'metric-grid'); stat(`Weekly ${c.pointsName}`, data.weekPoints, stats); stat('Completed actions', data.weekRows.length, stats); stat('Weekly target', `${c.daysPerWeek} days`, stats); box.append(stats);
     const days = el('ul', undefined, 'week-days');
     for (let n = 0; n < 7; n++) { const d = new Date(`${data.weekStart}T12:00:00`); d.setDate(d.getDate() + n); const count = data.weekRows.filter(e => e.localDate === dateKey(d)).length; days.append(el('li', `${DAYS[d.getDay()]}: ${count} actions${c.scheduledDays.includes(d.getDay()) ? '' : ' · rest day'}`)); } box.append(days);
@@ -274,6 +275,7 @@ function restoreControl(parent) {
   const f = field('RESTORE A BACKUP', '', 100, false); f.input.type = 'file'; f.input.accept = '.json,application/json'; f.input.removeAttribute('maxlength'); parent.append(f.wrap);
   f.input.addEventListener('change', async () => {
     const file = f.input.files[0]; if (!file) return;
+    f.input.disabled = true;
     try {
       if (file.size > MAX_BACKUP) throw new ValidationError(['Choose a backup smaller than 8 MB.']);
       await writes;
@@ -284,7 +286,7 @@ function restoreControl(parent) {
       if (!await confirmChange('Restore this backup?', 'This replaces the plan and progress in this browser. Save a backup of your current tracker first if you want to keep it.', 'RESTORE THIS BACKUP', view)) return;
       state = await store.change(() => restored, expected); preview = null; screen = null; $('storageMessage').classList.add('hidden'); render(); toast('Backup restored.');
     } catch (e) { toast(e instanceof StorageError ? e.message : 'This backup could not be restored. Your current tracker is unchanged. Choose a valid Goal Tracker backup.'); }
-    finally { f.input.value = ''; }
+    finally { f.input.value = ''; f.input.disabled = false; }
   });
 }
 function settings() {

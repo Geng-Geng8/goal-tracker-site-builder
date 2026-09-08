@@ -15,10 +15,16 @@ self.addEventListener('activate', event => {
     for (const name of await caches.keys()) {
       if (name === CACHE) continue;
       if (name.startsWith(PREFIX)) await caches.delete(name);
-      // The original starter used an unscoped cache. Delete only if it contains our shell.
+      // The starter shared one cache name across repository sites on an origin.
+      // Remove only our entries; another site's cached resources must survive.
       else if (/^goal-tracker-shell-v\d+$/.test(name)) {
         const old = await caches.open(name);
-        if (await old.match(new URL('./index.html', SCOPE).href)) await caches.delete(name);
+        if (await old.match(new URL('./index.html', SCOPE).href)) {
+          for (const request of await old.keys()) {
+            if (request.url.startsWith(SCOPE)) await old.delete(request);
+          }
+          if ((await old.keys()).length === 0) await caches.delete(name);
+        }
       }
     }
     await self.clients.claim();
