@@ -14,12 +14,12 @@ function worker() {
 test('service worker caches exactly existing V1 shell resources', async () => {
   const w = worker(); await w.run('install'); const urls = [...w.data.values()][0];
   for (const url of urls.keys()) { const name = new URL(url).pathname.split('/').pop() || 'index.html'; assert.ok(fs.existsSync(new URL('../' + name, import.meta.url)), name); }
-  assert.ok([...urls.keys()].some(x => x.endsWith('core.js'))); assert.ok(![...urls.keys()].some(x => /api\.js|offline\.js/.test(x)));
+  assert.ok([...urls.keys()].some(x => x.endsWith('core.js'))); assert.ok([...urls.keys()].some(x => x.includes('student-examples.js'))); assert.ok(![...urls.keys()].some(x => /api\.js|offline\.js/.test(x)));
   assert.equal(w.self.skipped, undefined);
 });
 test('activation cleans only own older caches and matching legacy cache', async () => {
   const w = worker(); await w.run('install'); const current = [...w.data.keys()][0];
-  const old = current.replace('universal-v1-1', 'older'); w.data.set(old, new Map());
+  const old = current.replace('universal-v1-2', 'older'); w.data.set(old, new Map());
   w.data.set('goal-tracker-shell-v1', new Map([[w.scope + 'index.html', {}]])); w.data.set('unrelated-app', new Map()); w.data.set('goal-tracker-shell-other-site-old', new Map());
   await w.run('activate'); assert.ok(w.deleted.includes(old)); assert.ok(w.deleted.includes('goal-tracker-shell-v1')); assert.ok(w.data.has('unrelated-app')); assert.ok(w.data.has('goal-tracker-shell-other-site-old'));
 });
@@ -41,9 +41,9 @@ test('manifest uses relative Pages URLs and proper icons', () => {
   for (const icon of m.icons) { const png = fs.readFileSync(new URL('../' + icon.src, import.meta.url)); assert.equal(`${png.readUInt32BE(16)}x${png.readUInt32BE(20)}`, icon.sizes); }
 });
 test('application has no remote requests, dynamic scripts, unsafe DOM sinks or obsolete core dependencies', () => {
-  const app = fs.readFileSync(new URL('../app.js', import.meta.url), 'utf8'), core = fs.readFileSync(new URL('../core.js', import.meta.url), 'utf8'), html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  assert.doesNotMatch(app + core, /\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket|innerHTML|outerHTML|insertAdjacentHTML|new Function|\beval\s*\(/);
-  assert.doesNotMatch(html + app, /script\.google\.com|jsonp|GoalTrackerAPI|waiting to sync/i); assert.match(html, /connect-src 'none'/);
+  const app = fs.readFileSync(new URL('../app.js', import.meta.url), 'utf8'), core = fs.readFileSync(new URL('../core.js', import.meta.url), 'utf8'), examples = fs.readFileSync(new URL('../student-examples.js', import.meta.url), 'utf8'), html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.doesNotMatch(app + core + examples, /\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket|innerHTML|outerHTML|insertAdjacentHTML|new Function|\beval\s*\(/);
+  assert.doesNotMatch(html + app + examples, /script\.google\.com|jsonp|GoalTrackerAPI|waiting to sync/i); assert.match(html, /connect-src 'none'/);
 });
 test('accessibility foundations include labels, dialogs, keyboard focus and reduced motion', () => {
   const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8'), css = fs.readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
