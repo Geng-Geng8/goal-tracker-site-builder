@@ -1,712 +1,333 @@
-(() => {
-  'use strict';
+import { STORAGE_KEY, MAX_SETUP, MAX_BACKUP, DAYS, AREAS, QUESTIONS, SAFETY_MESSAGE, LocalStore, StorageError, ValidationError, freshState, safetyConcern, makePrompt, parseSetup, matchPlan, repairPrompt, validateConfig, completeAction, calculate, dateKey, makeBackup, parseBackup } from './core.js';
 
-  const API = window.GoalTrackerAPI;
-  const Offline = window.GoalTrackerOffline;
+const $ = id => document.getElementById(id);
+const main = $('main');
+let store, state, preview = null, screen = null, toastTimer, historyLimit = 100, renderedDate = dateKey();
+let writes = Promise.resolve();
+try { store = new LocalStore(localStorage, navigator.locks); state = store.read(); } catch (error) { showStorageError(error); }
 
-  const DEMO = {
-    app: {
-      success: true,
-      settings: {
-        'App Name': 'My Goal Tracker',
-        'Main Goal': 'Turn your goal into daily action.',
-        'Daily Point Goal': 10,
-        'Weekly Point Goal': 40,
-        'Streak Rule': 'Every day'
-      },
-      categories: [],
-      actions: [
-        { Action: 'Practice for 10 minutes', Category: 'Practice', Difficulty: 'Easy', Points: 1, 'Daily Goal': 1, 'Weekly Goal': 5, Enabled: 'Yes' },
-        { Action: 'Do one focused work block', Category: 'Learning', Difficulty: 'Medium', Points: 3, 'Daily Goal': 1, 'Weekly Goal': 4, Enabled: 'Yes' },
-        { Action: 'Finish an important task', Category: 'Big Wins', Difficulty: 'Hard', Points: 5, 'Daily Goal': 0, 'Weekly Goal': 2, Enabled: 'Yes' }
-      ],
-      milestones: [
-        { Milestone: 'Finish my first week', Completed: 'No' },
-        { Milestone: 'Reach my first big checkpoint', Completed: 'No' }
-      ],
-      appText: {
-        'Points Name': 'XP',
-        'Streak Name': 'Streak'
-      }
-    },
-    today: { success: true, points: 0, actions: [] },
-    week: { success: true, points: 0, actions: [] },
-    history: { success: true, actions: [] }
-  };
-
-  const state = {
-    app: DEMO.app,
-    today: DEMO.today,
-    week: DEMO.week,
-    history: DEMO.history,
-    loading: false,
-    activeView: 'today'
-  };
-
-  const els = {};
-  let toastTimer = null;
-
-  document.addEventListener('DOMContentLoaded', init);
-
-  function init() {
-    cacheElements();
-    bindEvents();
-    hydrateFromCache();
-    updateNetworkStatus();
-    updateConnectionCard();
-    render();
-
-    if (API.getEndpoint()) {
-      refreshData({ quiet: true });
+// All user/AI/backup strings enter the DOM through textContent or input.value.
+function el(tag, text, className) {
+  const node = document.createElement(tag);
+  if (text !== undefined) node.textContent = text;
+  if (className) node.className = className;
+  return node;
+}
+function button(text, onClick, secondary = false) {
+  const b = el('button', text, secondary ? 'button button-secondary' : 'button'); b.type = 'button';
+  b.addEventListener('click', async () => {
+    if (b.disabled) return;
+    b.disabled = true;
+    try { await onClick(); } catch (error) { if (error instanceof StorageError) showStorageError(error); else toast(error instanceof ValidationError ? error.problems.join(' ') : 'That could not be completed. Please try again.'); }
+    finally { if (b.isConnected) b.disabled = false; }
+  }); return b;
+}
+function para(text, parent = main, cls = 'subtle') { const p = el('p', text, cls); parent.append(p); return p; }
+function title(text, eyebrow) { if (eyebrow) main.append(el('p', eyebrow, 'eyebrow')); const h = el('h1', text); h.tabIndex = -1; main.append(h); return h; }
+function row(...nodes) { const div = el('div', undefined, 'button-row'); div.append(...nodes); return div; }
+function card() { const node = el('section', undefined, 'card hero-card'); main.append(node); return node; }
+function toast(text) { clearTimeout(toastTimer); $('toast').textContent = text; $('toast').classList.add('show'); toastTimer = setTimeout(() => $('toast').classList.remove('show'), 5000); }
+function showStorageError(error) { $('storageMessage').textContent = error.message; $('storageMessage').classList.remove('hidden'); }
+function mutate(fn) {
+  const result = writes.then(async () => { state = await store.change(fn); $('storageMessage').classList.add('hidden'); return state; });
+  writes = result.catch(() => {}); return result;
+}
+async function go(stage) { await mutate(s => { s.onboarding.stage = stage; return s; }); screen = null; preview = null; render(); }
+function setOnboarding(fn) { return mutate(s => { fn(s.onboarding); return s; }); }
+function field(label, value, max = 500, large = true) {
+  const wrap = el('div', undefined, 'field'); const id = `field-${document.querySelectorAll('textarea,input').length}`;
+  const l = el('label', label); l.htmlFor = id;
+  const input = el(large ? 'textarea' : 'input'); input.id = id; input.value = value; input.maxLength = max; input.autocomplete = 'off'; input.spellcheck = true;
+  if (large) input.rows = 5;
+  wrap.append(l, input); return { wrap, input };
+}
+function progress(value, max, label, parent) {
+  const p = el('progress'); p.max = max; p.value = Math.min(value, max); p.setAttribute('aria-label', label); parent.append(p);
+}
+function summary(c, parent) {
+  const dl = el('dl', undefined, 'summary');
+  for (const [label, value] of [['Tracker', c.appName], ['Goal', c.mainGoal], ['Success', c.successDefinition], ['Time', c.targetDate], ['Schedule', c.scheduledDays.map(d => DAYS[d]).join(', ')], ['Daily target', `${c.dailyTarget} useful action${c.dailyTarget === 1 ? '' : 's'}`], ['Style', `${c.style.feel} · ${c.style.mode} · ${c.style.accent}`]]) dl.append(el('dt', label), el('dd', value));
+  parent.append(dl, el('h2', 'Your actions'));
+  const list = el('ul'); c.actions.forEach(a => list.append(el('li', `${a.name} · ${a.difficulty} · ${a.points} ${c.pointsName}`))); parent.append(list);
+  if (c.milestones.length) { parent.append(el('h2', 'Milestones')); const ms = el('ul'); c.milestones.forEach(m => ms.append(el('li', m.name))); parent.append(ms); }
+}
+function applyTheme(c) {
+  document.documentElement.dataset.mode = c?.style.mode || 'dark';
+  document.documentElement.dataset.accent = c?.style.accent || 'lime';
+  document.documentElement.dataset.feel = c?.style.feel || 'calm';
+}
+function render(focus = true) {
+  clearTimeout(toastTimer); $('toast').classList.remove('show');
+  main.replaceChildren();
+  applyTheme(preview || state?.trackerConfig);
+  document.title = state?.trackerConfig?.appName || 'Universal Goal Tracker';
+  if (!state) recovery();
+  else if (screen === 'teacher') teacher();
+  else if (screen === 'tools') settings();
+  else if (preview) previewScreen();
+  else ({ welcome, area, builder, review, handoff, import: importScreen, tracker }[state.onboarding.stage])();
+  if (focus) main.querySelector('h1')?.focus();
+}
+function welcome() {
+  title('Build Your Own Goal Tracker', 'SMALL ACTIONS. SOMETHING THAT MATTERS.');
+  para('Turn something you want to improve into your own personal tracker.');
+  const box = card(); box.append(el('h2', 'You make the important decisions.'));
+  para('AI helps organize your plan. Use AI to build something that helps you do the work.', box);
+  para('About 15–25 minutes. No account needed here.', box);
+  box.append(row(button('BUILD MY TRACKER', () => go('area')), button("I'M A TEACHER", () => { screen = 'teacher'; render(); }, true)));
+  para('Age 13+. If you are younger than 13, complete the AI part with a teacher, parent, guardian, or another appropriate adult using an appropriate account.', box);
+  para('Keep legal names, contact details, school, location and health information out of your plan. The AI tool you use has its own privacy rules. Only copy a plan you are comfortable sharing.', box);
+  showLegacyNotice(box);
+}
+const LEGACY_KEYS = ['goalTracker:apiUrl:v1', 'goalTracker:lastData:v1', 'goalTracker:lastSynced:v1', 'goalTracker:offlineQueue:v1', 'goalTracker:lastTap:v1'];
+function legacyData() { try { return Object.fromEntries(LEGACY_KEYS.map(k => [k, localStorage.getItem(k)]).filter(([, v]) => v !== null)); } catch { return {}; } }
+function showLegacyNotice(parent) {
+  if (!Object.keys(legacyData()).length) return;
+  para('Data from an earlier tracker is still on this browser. It has been left untouched. Its old history cannot be automatically converted into a complete V1 tracker.', parent, 'notice');
+  parent.append(button('Save earlier data for safekeeping', () => download(JSON.stringify(legacyData(), null, 2), 'earlier-tracker-archive.json'), true));
+  para('This archive is for safekeeping; it is not a V1 restore file.', parent);
+}
+function area() {
+  title('What would you like to work on?', 'STEP 1 · CHOOSE A GOAL AREA');
+  para('Pick a starting point. You decide the goal.');
+  const grid = el('div', undefined, 'action-grid');
+  AREAS.forEach(a => grid.append(button(a, async () => { await setOnboarding(o => { o.area = a; o.approved = false; o.stage = 'builder'; o.step = 0; }); render(); }, true)));
+  main.append(grid, row(button('BACK', () => go('welcome'), true)));
+}
+const IDEAS = {
+  School: ['Explain a math method in my own words', 'Practice a few questions, then check my work'],
+  Sports: ['Practice a technique safely', 'Ask my coach for feedback on one skill'],
+  Fitness: ['Build a comfortable movement routine', 'Choose an enjoyable activity with time for rest'],
+  Reading: ['Read regularly and remember what I learn', 'Read a short section and write one thought'],
+  'Art / Music': ['Practice a drawing or music technique', 'Make a small study and notice one improvement'],
+  'Saving Money': ['Plan small purchases more thoughtfully', 'Compare a want with my saving goal'],
+  'Learning a Skill': ['Learn a few useful phrases', 'Practice one small skill and use it'],
+  'Helping at Home': ['Help with a regular household task', 'Finish one agreed task carefully'],
+  'Something Else': ['Get better at something I enjoy', 'Practice a small useful step'],
+  "I Don't Know Yet": ['What would you like to feel more confident doing?', 'Try a small goal: summarize what you read, practice a skill, or finish a helpful task. Choose one that matters to you.']
+};
+function builder() {
+  const o = state.onboarding, [key, question, help] = QUESTIONS[o.step];
+  title(question, `QUESTION ${o.step + 1} OF ${QUESTIONS.length} · ${o.area}`);
+  progress(o.step + 1, QUESTIONS.length, `Question ${o.step + 1} of ${QUESTIONS.length}`, main);
+  para(help);
+  const box = card(); let input;
+  if (key === 'schedule') {
+    const group = el('fieldset'), legend = el('legend', 'Choose the days that work for you'); group.append(legend);
+    const count = para(`${o.scheduledDays.length} days each week`, box);
+    for (const day of [1, 2, 3, 4, 5, 6, 0]) {
+      const label = el('label', undefined, 'day-choice'); const check = el('input'); check.type = 'checkbox'; check.value = String(day); check.checked = o.scheduledDays.includes(day);
+      check.addEventListener('change', () => {
+        const selected = [...group.querySelectorAll('input:checked')].map(n => Number(n.value));
+        count.textContent = `${selected.length} days each week`;
+        setOnboarding(d => { d.scheduledDays = selected; d.approved = false; }).catch(showStorageError);
+      }); label.append(check, el('span', DAYS[day])); group.append(label);
     }
+    box.append(group);
+  } else {
+    const f = field('Your answer', o.answers[key], key === 'name' ? 60 : key === 'time' ? 100 : 500, !['name', 'time'].includes(key)); input = f.input; box.append(f.wrap);
+    input.addEventListener('input', () => { const value = input.value; setOnboarding(d => { d.answers[key] = value; d.approved = false; }).catch(showStorageError); });
+    const ideas = el('div', undefined, 'notice hidden'); ideas.setAttribute('role', 'status');
+    const generic = { why: 'Think about how this would help you in everyday life.', success: 'What could you show, explain, finish, or do more confidently?', time: 'Try a time frame with room to learn, such as 6 weeks.', easy: 'Pick the smallest useful version of an action you already listed.', effort: 'Which action needs more focus or practice, while staying safe?', feel: 'Calm and dark? Sporty and blue? A simple light layout? You choose.', name: 'Try a short title such as Small Steps, Practice Lab, or My Next Chapter.' };
+    box.append(button('GIVE ME IDEAS', () => { ideas.textContent = generic[key] || IDEAS[o.area].join(' '); ideas.classList.remove('hidden'); }, true), ideas);
   }
-
-  function cacheElements() {
-    [
-      'appName', 'mainGoal', 'networkStatus', 'queueStatus', 'connectionCard', 'connectionForm', 'apiUrl',
-      'connectionMessage', 'changeConnectionButton', 'todayPoints', 'pointsLabelToday', 'todayProgressText',
-      'todayPercent', 'todayProgressBar', 'currentStreak', 'todayActionCount', 'todayGoalStatus', 'streakLabel',
-      'actionList', 'actionEmpty', 'weekPoints', 'pointsLabelWeek', 'weekProgressText', 'weekPercent',
-      'weekProgressBar', 'weekActionList', 'progressGoalText', 'totalPoints', 'totalActions', 'progressStreak',
-      'milestoneList', 'milestoneEmpty', 'historyList', 'historyEmpty', 'refreshButton', 'lastSynced', 'toast'
-    ].forEach((id) => {
-      els[id] = document.getElementById(id);
-    });
+  const error = el('p', '', 'form-message error'); error.setAttribute('role', 'alert'); box.append(error);
+  box.append(row(button('NEXT', async () => {
+    await writes;
+    const latest = state.onboarding;
+    if (key === 'schedule' ? !latest.scheduledDays.length : !latest.answers[key].trim()) { error.textContent = key === 'schedule' ? 'Choose at least one realistic day.' : 'Add your answer before moving on.'; input?.focus(); return; }
+    if (safetyConcern(Object.values(latest.answers).join(' '))) { error.textContent = SAFETY_MESSAGE; return; }
+    await setOnboarding(d => { if (d.step === 9) d.stage = 'review'; else d.step++; }); render();
+  }), button('BACK', async () => { await setOnboarding(d => { if (d.step === 0) d.stage = 'area'; else d.step--; }); render(); }, true)));
+}
+function review() {
+  title('Your Goal Plan', 'STEP 2 · YOU DECIDE');
+  para('Check that this sounds like you. Approve it before sharing anything with AI.');
+  const box = card(), dl = el('dl', undefined, 'summary');
+  QUESTIONS.forEach(([key, q]) => dl.append(el('dt', q), el('dd', key === 'schedule' ? state.onboarding.scheduledDays.map(d => DAYS[d]).join(', ') : state.onboarding.answers[key])));
+  box.append(dl, row(button('LOOKS GOOD', async () => {
+    if (safetyConcern(JSON.stringify(state.onboarding.answers))) { toast(SAFETY_MESSAGE); return; }
+    await setOnboarding(o => { o.approved = true; o.stage = 'handoff'; }); render();
+  }), button('CHANGE SOMETHING', async () => { await setOnboarding(o => { o.approved = false; o.step = 0; o.stage = 'builder'; }); render(); }, true)));
+}
+async function copy(text, parent) {
+  try { await navigator.clipboard.writeText(text); toast('Copied. You are ready for the next step.'); return true; }
+  catch {
+    const f = field('Copy this text', text, Math.max(text.length, MAX_SETUP)); f.input.readOnly = true; parent.append(f.wrap); f.input.focus(); f.input.select();
+    toast('Automatic copy is unavailable. Use Copy in the selected text’s menu, or Ctrl+C / Command+C.'); return false;
   }
-
-  function bindEvents() {
-    document.querySelectorAll('.tab').forEach((tab) => {
-      tab.addEventListener('click', () => switchView(tab.dataset.view));
-    });
-
-    els.connectionForm.addEventListener('submit', connectSheet);
-    els.changeConnectionButton.addEventListener('click', () => {
-      els.connectionCard.classList.remove('hidden');
-      els.apiUrl.value = API.getEndpoint();
-      els.apiUrl.focus();
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    });
-    els.refreshButton.addEventListener('click', () => refreshData({ quiet: false }));
-
-    window.addEventListener('online', async () => {
-      updateNetworkStatus();
-      if (API.getEndpoint()) {
-        await syncQueueAndRefresh();
-      }
-    });
-    window.addEventListener('offline', updateNetworkStatus);
-    window.addEventListener('goaltracker:queuechange', () => {
-      updateQueueStatus();
-      render();
-    });
-    window.addEventListener('goaltracker:flushcomplete', (event) => {
-      updateQueueStatus();
-      if (event.detail && event.detail.synced > 0) {
-        showToast(`${event.detail.synced} saved action${event.detail.synced === 1 ? '' : 's'} synced.`);
-      }
-    });
+}
+function handoff() {
+  title('Let AI organize your approved plan', 'STEP 3 · COPY → PASTE');
+  const box = card();
+  para('Use the AI tool approved by your teacher or adult. The prompt is ready; you do not need to edit it.', box);
+  box.append(button('COPY MY AI PROMPT', () => copy(makePrompt(state.onboarding), box)));
+  const list = el('ol'); ['Open ChatGPT, Gemini, or the AI tool your teacher/adult told you to use.', 'Paste your prompt.', 'Press Send.', 'Copy the complete Tracker Setup it gives you.', 'Come back here.'].forEach(t => list.append(el('li', t))); box.append(list);
+  para('Only your approved plan is included. The external AI service has its own account and privacy rules. Under 13? Do this part with an appropriate adult using an appropriate account.', box);
+  box.append(row(button('I HAVE MY TRACKER SETUP', () => go('import')), button('BACK TO MY PLAN', () => go('review'), true)));
+}
+function importScreen() {
+  title('Paste your Tracker Setup', 'STEP 4 · SEE YOUR APP');
+  para('Paste the AI’s reply here. Extra words and Markdown around the setup are okay.');
+  const box = card(), f = field('Tracker Setup from your AI conversation', state.onboarding.paste, MAX_SETUP + 1); f.input.rows = 10; box.append(f.wrap);
+  // Oversized text is shown for a friendly repair but never persisted or parsed.
+  f.input.addEventListener('input', () => { if (f.input.value.length <= MAX_SETUP) { const value = f.input.value; setOnboarding(o => { o.paste = value; }).catch(showStorageError); } });
+  const error = el('div'); error.setAttribute('role', 'alert');
+  box.append(row(button('BUILD MY TRACKER', async () => {
+    error.replaceChildren();
+    try { preview = matchPlan(parseSetup(f.input.value), state.onboarding); render(); }
+    catch (e) {
+      const problems = e instanceof ValidationError ? e.problems : ['Return a complete valid Tracker Setup.'];
+      error.append(el('h2', 'Almost there.'), el('p', problems.includes(SAFETY_MESSAGE) ? SAFETY_MESSAGE : 'AI missed one part of your Tracker Setup. Copy this fix prompt into the same AI conversation, then paste its complete corrected reply here.'));
+      error.append(button('COPY FIX PROMPT', () => copy(repairPrompt(problems), error), true));
+    }
+  }), button('BACK', () => go('handoff'), true)), error);
+}
+function previewScreen() {
+  title('Does this tracker work for you?', 'PREVIEW · NOTHING SAVED YET');
+  para('You have the final say. Check the actions and points before saving.');
+  const box = card(); summary(preview, box);
+  const f = field('Daily action target — choose a realistic number', String(preview.dailyTarget), 1, false); f.input.type = 'number'; f.input.min = '1'; f.input.max = String(preview.actions.length); box.append(f.wrap);
+  box.append(row(button('SAVE TRACKER', async () => {
+    const config = validateConfig({ ...preview, dailyTarget: Number(f.input.value) });
+    await mutate(s => { if (s.trackerConfig) throw new StorageError('A tracker was saved in another tab. Open it before making changes.'); s.trackerConfig = config; s.onboarding.stage = 'tracker'; s.onboarding.paste = ''; return s; });
+    preview = null; render(); toast('Your tracker is saved on this browser. Choose an action when you have done the work.');
+  }), button('BACK TO PASTE', () => { preview = null; render(); }, true), button('CHANGE MY PLAN', () => go('review'), true)));
+}
+function stat(label, value, parent) { const node = el('div', undefined, 'metric-card'); node.append(el('span', label, 'mini-label'), el('strong', String(value))); parent.append(node); }
+function tracker() {
+  const c = state.trackerConfig, data = calculate(state); renderedDate = dateKey();
+  title(c.appName); para(c.mainGoal);
+  const nav = el('nav', undefined, 'tabbar'); nav.setAttribute('aria-label', 'Tracker screens');
+  for (const tab of ['today', 'week', 'progress', 'history']) {
+    const b = button(tab.toUpperCase(), async () => { await mutate(s => { s.preferences.activeTab = tab; return s; }); render(); }, true); b.className = `tab ${state.preferences.activeTab === tab ? 'active' : ''}`;
+    if (state.preferences.activeTab === tab) b.setAttribute('aria-current', 'page'); nav.append(b);
   }
-
-  function hydrateFromCache() {
-    const cached = API.readCachedData();
-    if (!cached) return;
-    state.app = cached.app || state.app;
-    state.today = cached.today || state.today;
-    state.week = cached.week || state.week;
-    state.history = cached.history || state.history;
+  main.append(nav);
+  if (state.preferences.activeTab === 'today') {
+    const box = card(); box.append(el('h2', "Today's progress"));
+    para(`${data.todayRows.length} of ${c.dailyTarget} actions`, box); progress(data.todayRows.length, c.dailyTarget, "Today's action target", box);
+    const stats = el('div', undefined, 'metric-grid'); stat(c.pointsName, data.todayPoints, stats); stat(c.streakName, `${data.currentStreak} scheduled day${data.currentStreak === 1 ? '' : 's'}`, stats); stat('Actions today', data.todayRows.length, stats); box.append(stats);
+    para(data.todayRows.length >= c.dailyTarget ? 'Your action target is met. Make time for rest, too.' : c.scheduledDays.includes(new Date().getDay()) ? 'New day. You can start again.' : 'A rest day. Any action today is optional.', box);
+    main.append(el('h2', 'What have you done today?'));
+    para('Tap after you complete the action. Each action counts once per day.');
+    const grid = el('div', undefined, 'action-grid');
+    c.actions.forEach(a => {
+      const done = data.todayRows.some(e => e.actionId === a.id);
+      const b = button('', async () => {
+        await mutate(s => completeAction(s, a.id)); render();
+        const next = main.querySelector('.action-card:not(:disabled)'); next?.focus(); toast(`Saved: ${a.name}. +${a.points} ${c.pointsName}.`);
+      }); b.className = 'action-card'; b.disabled = done;
+      b.append(el('span', a.name, 'action-name'), el('span', `${a.category} · ${a.difficulty}`, 'action-meta'), el('span', done ? '✓ Completed today' : `+${a.points} ${c.pointsName}`, 'points-chip')); grid.append(b);
+    }); main.append(grid);
+  } else if (state.preferences.activeTab === 'week') {
+    const box = card(); box.append(el('h2', 'This week')); para('Monday through Sunday. A worked day means at least one useful action.', box);
+    para(`${data.weekDays} day${data.weekDays === 1 ? '' : 's'} worked · target ${c.daysPerWeek} day${c.daysPerWeek === 1 ? '' : 's'}`, box); progress(data.weekDays, c.daysPerWeek, 'Days worked toward weekly target', box);
+    const stats = el('div', undefined, 'metric-grid'); stat(`Weekly ${c.pointsName}`, data.weekPoints, stats); stat('Completed actions', data.weekRows.length, stats); stat('Weekly target', `${c.daysPerWeek} days`, stats); box.append(stats);
+    const days = el('ul', undefined, 'week-days');
+    for (let n = 0; n < 7; n++) { const d = new Date(`${data.weekStart}T12:00:00`); d.setDate(d.getDate() + n); const count = data.weekRows.filter(e => e.localDate === dateKey(d)).length; days.append(el('li', `${DAYS[d.getDay()]}: ${count} actions${c.scheduledDays.includes(d.getDay()) ? '' : ' · rest day'}`)); } box.append(days);
+    c.actions.forEach(a => box.append(el('p', `${a.name}: ${data.weekRows.filter(e => e.actionId === a.id).length} completed`)));
+  } else if (state.preferences.activeTab === 'progress') {
+    const box = card(); box.append(el('h2', 'Your work adds up'));
+    const stats = el('div', undefined, 'metric-grid');
+    [[`Total ${c.pointsName}`, data.totalPoints], ['Current streak', data.currentStreak], ['Best streak', data.bestStreak], ['Days worked', data.daysWorked], ['Completed milestones', state.milestoneState.length]].forEach(([l, v]) => stat(l, v, stats)); box.append(stats);
+    para(`Success looks like: ${c.successDefinition}`, box); para(`Your time frame: ${c.targetDate}`, box);
+    para(`Your schedule: ${c.scheduledDays.map(d => DAYS[d]).join(', ')}. A streak counts scheduled days when you reach ${c.dailyTarget} actions. Rest days do not add to or break it. Today stays open until midnight. A missed scheduled day starts a fresh count; your past work stays.`, box);
+    main.append(el('h2', 'Milestones'));
+    if (!c.milestones.length) para('No milestones in this plan. Your actions still count.');
+    c.milestones.forEach(m => {
+      const complete = state.milestoneState.some(x => x.id === m.id), line = el('div', undefined, 'milestone-row');
+      line.append(el('span', m.name), button(complete ? '✓ Done — undo' : 'Mark done', async () => { await mutate(s => { const done = s.milestoneState.some(x => x.id === m.id); s.milestoneState = done ? s.milestoneState.filter(x => x.id !== m.id) : [...s.milestoneState, { id: m.id, completedAt: new Date().toISOString() }]; return s; }); render(); }, true)); main.append(line);
+    });
+  } else {
+    const box = card(); box.append(el('h2', 'Your action history'));
+    if (!state.actionHistory.length) para('Your completed actions will appear here.', box);
+    const history = [...state.actionHistory].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    history.slice(0, historyLimit).forEach(e => { const r = el('div', undefined, 'history-row'), copy = el('div'); copy.append(el('p', e.actionName, 'row-title'), el('p', `${e.localDate} · ${new Date(e.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`, 'row-meta')); r.append(copy, el('span', `+${e.points}`, 'row-value')); box.append(r); });
+    if (history.length > historyLimit) box.append(button('Show more history', () => { historyLimit += 100; render(); }, true));
   }
-
-  async function connectSheet(event) {
-    event.preventDefault();
-    const url = els.apiUrl.value;
-    setConnectionMessage('Connecting…');
-
+}
+function teacher() {
+  title('A small project in student agency', 'TEACHER GUIDE');
+  const box = card();
+  for (const [h, p] of [
+    ['Learning goals', 'Students define success, choose actions they control, set a realistic schedule, and critically review AI output. Use AI to build something that helps you do the work. AI organizes an approved plan; students make the decisions.'],
+    ['15–25 minutes', 'Choose a goal area → answer ten questions → approve the Goal Plan → copy a prepared prompt into an approved AI tool → copy its Tracker Setup back → preview and save → use the tracker. No software code or manual JSON editing.'],
+    ['Age 13+ and supervision', 'Independent use is intended for ages 13+. Younger students complete the external AI part with a teacher, parent, guardian, or another appropriate adult using an appropriate account. Follow your classroom and AI provider requirements. Supervise goal selection and review generated actions together.'],
+    ['Privacy', 'The public app uses no student accounts, backend, analytics, grading or teacher monitoring. Plans and progress stay in the browser profile. Do not enter names, school, location, contact details or health information. External AI tools have their own privacy rules. Use the approved tool and account.'],
+    ['Healthy goals', 'Keep goals safe, realistic and within the student’s control. Lightweight phrase checks redirect some concerning goals to trusted-adult support; they are not a complete safety review. Students should never use a tracker to manage a crisis or highly personal circumstances.'],
+    ['Troubleshooting', 'For a rejected AI reply, use Copy Fix Prompt in the same AI conversation and paste the complete corrected setup. If automatic copy is blocked, select the supplied text and use the device’s Copy command. Browser storage must be enabled. Save a backup before clearing site data or switching devices. A backup can be restored after you preview and confirm it.'],
+    ['Offline and installation', 'After the app finishes preparing offline, it can reopen and record actions without internet. Use Install app when available, or your browser’s Add to Home Screen / Install menu. Installation is optional. There is no cross-device sync.']
+  ]) { box.append(el('h2', h)); para(p, box); }
+  box.append(button('BACK', () => { screen = null; render(); }, true));
+}
+function download(text, name) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' })); const a = el('a'); a.href = url; a.download = name; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+async function confirmChange(heading, description, label, content) {
+  const dialog = $('confirmDialog'), previous = document.activeElement;
+  $('confirmTitle').textContent = heading; $('confirmDescription').textContent = description; $('confirmYes').textContent = label; $('confirmPreview').replaceChildren();
+  if (content) $('confirmPreview').append(content);
+  dialog.returnValue = ''; dialog.showModal();
+  return new Promise(resolve => dialog.addEventListener('close', () => { if (previous?.isConnected) previous.focus(); resolve(dialog.returnValue === 'confirm'); }, { once: true }));
+}
+function restoreControl(parent) {
+  const f = field('RESTORE A BACKUP', '', 100, false); f.input.type = 'file'; f.input.accept = '.json,application/json'; f.input.removeAttribute('maxlength'); parent.append(f.wrap);
+  f.input.addEventListener('change', async () => {
+    const file = f.input.files[0]; if (!file) return;
+    f.input.disabled = true;
     try {
-      await API.testConnection(url);
-      setConnectionMessage('Connected. Loading your tracker…');
-      await refreshData({ quiet: true });
-      els.connectionCard.classList.add('hidden');
-      showToast('Google Sheet connected.');
-    } catch (error) {
-      setConnectionMessage(humanError(error), true);
-    }
-  }
-
-  function setConnectionMessage(message, isError = false) {
-    els.connectionMessage.textContent = message;
-    els.connectionMessage.classList.toggle('error', isError);
-  }
-
-  function updateConnectionCard() {
-    const endpoint = API.getEndpoint();
-    els.connectionCard.classList.toggle('hidden', Boolean(endpoint));
-    els.changeConnectionButton.textContent = endpoint ? 'Change Google Sheet' : 'Connect Google Sheet';
-    if (endpoint) els.apiUrl.value = endpoint;
-  }
-
-  async function refreshData({ quiet = false } = {}) {
-    if (state.loading || !API.getEndpoint()) {
-      updateConnectionCard();
-      return;
-    }
-
-    if (!navigator.onLine) {
-      if (!quiet) showToast('You are offline. Showing saved information.');
-      render();
-      return;
-    }
-
-    state.loading = true;
-    els.refreshButton.disabled = true;
-
-    try {
-      await Offline.flush();
-      const [app, today, week, history] = await Promise.all([
-        API.getApp(),
-        API.getToday(),
-        API.getWeek(),
-        API.getHistory()
-      ]);
-
-      state.app = app;
-      state.today = today;
-      state.week = week;
-      state.history = history;
-      API.saveCachedData({ app, today, week, history });
-      API.setLastSynced();
-      updateConnectionCard();
-      render();
-      if (!quiet) showToast('Tracker refreshed.');
-    } catch (error) {
-      const cached = API.readCachedData();
-      if (cached) {
-        state.app = cached.app || state.app;
-        state.today = cached.today || state.today;
-        state.week = cached.week || state.week;
-        state.history = cached.history || state.history;
-      }
-      render();
-      if (!quiet) showToast(`Could not refresh: ${humanError(error)}`);
-    } finally {
-      state.loading = false;
-      els.refreshButton.disabled = false;
-    }
-  }
-
-  async function syncQueueAndRefresh() {
-    try {
-      const result = await Offline.flush();
-      if (result.synced > 0 || result.remaining === 0) {
-        await refreshData({ quiet: true });
-      }
-    } catch {
-      updateQueueStatus();
-    }
-  }
-
-  function switchView(view) {
-    state.activeView = view;
-    document.querySelectorAll('.tab').forEach((tab) => {
-      tab.classList.toggle('active', tab.dataset.view === view);
-    });
-    document.querySelectorAll('.view').forEach((section) => {
-      section.classList.toggle('active', section.id === `view-${view}`);
-    });
-  }
-
-  function render() {
-    updateNetworkStatus();
-    updateQueueStatus();
-    renderHeader();
-    renderToday();
-    renderWeek();
-    renderProgress();
-    renderHistory();
-    renderLastSynced();
-  }
-
-  function renderHeader() {
-    const settings = getSettings();
-    const appName = getSetting(['App Name', 'Name'], 'My Goal Tracker');
-    const mainGoal = getSetting(['Main Goal', 'Goal'], 'Turn your goal into daily action.');
-    document.title = appName;
-    els.appName.textContent = appName;
-    els.mainGoal.textContent = mainGoal;
-    els.progressGoalText.textContent = mainGoal;
-    els.streakLabel.textContent = getText(['Streak Name', 'Streak'], 'Streak');
-  }
-
-  function renderToday() {
-    const actions = enabledActions();
-    const pointsName = getText(['Points Name', 'Points', 'XP Name'], 'XP');
-    const pending = pendingRowsForDate(todayKey());
-    const serverActions = Array.isArray(state.today.actions) ? state.today.actions : [];
-    const todayRows = [...serverActions, ...pending];
-    const serverPoints = number(state.today.points);
-    const pendingPoints = pending.reduce((sum, row) => sum + number(row.Points), 0);
-    const points = serverPoints + pendingPoints;
-    const goal = dailyPointGoal();
-    const percent = percentOf(points, goal);
-    const streak = calculateStreak();
-
-    els.todayPoints.textContent = formatNumber(points);
-    els.pointsLabelToday.textContent = pointsName;
-    els.todayProgressText.textContent = `${formatNumber(points)} of ${formatNumber(goal)} ${pointsName}`;
-    els.todayPercent.textContent = `${percent}%`;
-    setProgress(els.todayProgressBar, percent);
-    els.todayActionCount.textContent = String(todayRows.length);
-    els.currentStreak.textContent = `${streak} day${streak === 1 ? '' : 's'}`;
-    els.todayGoalStatus.textContent = points >= goal && goal > 0 ? 'Goal complete' : 'Keep going';
-
-    els.actionList.replaceChildren();
-    els.actionEmpty.classList.toggle('hidden', actions.length > 0);
-
-    actions.forEach((action) => {
-      els.actionList.appendChild(makeActionButton(action, pointsName));
-    });
-  }
-
-  function makeActionButton(action, pointsName) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'action-card';
-
-    const top = document.createElement('div');
-    top.className = 'action-topline';
-
-    const copy = document.createElement('div');
-    copy.className = 'row-copy';
-
-    const name = document.createElement('div');
-    name.className = 'action-name';
-    name.textContent = String(action.Action || 'Action');
-
-    const meta = document.createElement('div');
-    meta.className = 'action-meta';
-    meta.textContent = [action.Category, action.Difficulty].filter(Boolean).join(' • ') || 'Goal action';
-
-    const chip = document.createElement('span');
-    chip.className = 'points-chip';
-    chip.textContent = `+${formatNumber(number(action.Points))} ${pointsName}`;
-
-    copy.append(name, meta);
-    top.append(copy, chip);
-    button.append(top);
-    button.addEventListener('click', () => logAction(action, button));
-    return button;
-  }
-
-  async function logAction(action, button) {
-    if (!API.getEndpoint()) {
-      els.connectionCard.classList.remove('hidden');
-      showToast('Connect your Google Sheet first.');
-      els.apiUrl.focus();
-      return;
-    }
-
-    try {
-      const item = Offline.enqueue('logAction', {
-        actionName: String(action.Action || ''),
-        points: number(action.Points),
-        category: String(action.Category || ''),
-        difficulty: String(action.Difficulty || '')
-      });
-
-      button.disabled = true;
-      render();
-      showToast(`Saved ${action.Action}. +${formatNumber(number(action.Points))}`);
-
-      if (navigator.onLine) {
-        await Offline.flush();
-        await refreshData({ quiet: true });
-      }
-
-      return item;
-    } catch (error) {
-      showToast(humanError(error));
-    } finally {
-      setTimeout(() => {
-        button.disabled = false;
-      }, 350);
-    }
-  }
-
-  function renderWeek() {
-    const pointsName = getText(['Points Name', 'Points', 'XP Name'], 'XP');
-    const pending = pendingRowsForWeek();
-    const serverRows = Array.isArray(state.week.actions) ? state.week.actions : [];
-    const rows = [...serverRows, ...pending];
-    const points = number(state.week.points) + pending.reduce((sum, row) => sum + number(row.Points), 0);
-    const goal = weeklyPointGoal();
-    const percent = percentOf(points, goal);
-
-    els.weekPoints.textContent = formatNumber(points);
-    els.pointsLabelWeek.textContent = pointsName;
-    els.weekProgressText.textContent = `${formatNumber(points)} of ${formatNumber(goal)} ${pointsName}`;
-    els.weekPercent.textContent = `${percent}%`;
-    setProgress(els.weekProgressBar, percent);
-
-    const actions = enabledActions();
-    els.weekActionList.replaceChildren();
-
-    if (!actions.length) {
-      const empty = document.createElement('p');
-      empty.className = 'empty-state';
-      empty.textContent = 'No actions are turned on yet.';
-      els.weekActionList.appendChild(empty);
-      return;
-    }
-
-    actions.forEach((action) => {
-      const name = String(action.Action || 'Action');
-      const count = rows.filter((row) => String(row.Action || '') === name).length;
-      const target = number(action['Weekly Goal']);
-      const row = document.createElement('div');
-      row.className = 'week-row';
-
-      const copy = document.createElement('div');
-      copy.className = 'row-copy';
-      const title = document.createElement('p');
-      title.className = 'row-title';
-      title.textContent = name;
-      const meta = document.createElement('p');
-      meta.className = 'row-meta';
-      meta.textContent = target > 0 ? `Weekly goal: ${target}` : 'No weekly target';
-      copy.append(title, meta);
-
-      const value = document.createElement('span');
-      value.className = 'row-value';
-      value.textContent = target > 0 ? `${count}/${target}` : String(count);
-      row.append(copy, value);
-      els.weekActionList.appendChild(row);
-    });
-  }
-
-  function renderProgress() {
-    const rows = combinedHistoryRows();
-    const streak = calculateStreak();
-    els.totalPoints.textContent = formatNumber(rows.reduce((sum, row) => sum + number(row.Points), 0));
-    els.totalActions.textContent = String(rows.length);
-    els.progressStreak.textContent = `${streak} day${streak === 1 ? '' : 's'}`;
-
-    const milestones = Array.isArray(state.app.milestones) ? state.app.milestones : [];
-    els.milestoneList.replaceChildren();
-    els.milestoneEmpty.classList.toggle('hidden', milestones.length > 0);
-
-    milestones.forEach((milestone) => {
-      const row = document.createElement('div');
-      row.className = 'milestone-row';
-      const copy = document.createElement('div');
-      copy.className = 'row-copy';
-      const title = document.createElement('p');
-      title.className = 'row-title';
-      title.textContent = String(milestone.Milestone || 'Milestone');
-      const meta = document.createElement('p');
-      meta.className = 'row-meta';
-
-      const completed = yes(milestone.Completed);
-      const pending = String(milestone.Completed || '').toLowerCase() === 'pending';
-      meta.textContent = completed ? 'Completed' : pending ? 'Waiting to sync' : 'Not completed yet';
-      copy.append(title, meta);
-      row.appendChild(copy);
-
-      if (completed) {
-        const mark = document.createElement('span');
-        mark.className = 'row-value milestone-complete';
-        mark.textContent = '✓';
-        row.appendChild(mark);
-      } else {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'milestone-button';
-        button.textContent = pending ? 'Pending' : 'Mark done';
-        button.disabled = pending;
-        button.addEventListener('click', () => completeMilestone(milestone, button));
-        row.appendChild(button);
-      }
-
-      els.milestoneList.appendChild(row);
-    });
-  }
-
-  async function completeMilestone(milestone, button) {
-    if (!API.getEndpoint()) {
-      els.connectionCard.classList.remove('hidden');
-      showToast('Connect your Google Sheet first.');
-      return;
-    }
-
-    try {
-      Offline.enqueue('completeMilestone', {
-        milestone: String(milestone.Milestone || '')
-      }, {
-        rapidTapKey: `milestone:${milestone.Milestone}`
-      });
-      milestone.Completed = 'Pending';
-      button.disabled = true;
-      renderProgress();
-      showToast('Milestone saved.');
-
-      if (navigator.onLine) {
-        await Offline.flush();
-        await refreshData({ quiet: true });
-      }
-    } catch (error) {
-      showToast(humanError(error));
-    }
-  }
-
-  function renderHistory() {
-    const rows = combinedHistoryRows().sort((a, b) => dateValue(b.Timestamp || b.Date) - dateValue(a.Timestamp || a.Date));
-    els.historyList.replaceChildren();
-    els.historyEmpty.classList.toggle('hidden', rows.length > 0);
-
-    rows.slice(0, 100).forEach((item) => {
-      const row = document.createElement('div');
-      row.className = 'history-row';
-
-      const copy = document.createElement('div');
-      copy.className = 'row-copy';
-      const title = document.createElement('p');
-      title.className = 'row-title';
-      title.textContent = String(item.Action || 'Action');
-      if (item.Pending) {
-        const pending = document.createElement('span');
-        pending.className = 'pending-tag';
-        pending.textContent = 'Waiting to sync';
-        title.appendChild(pending);
-      }
-      const meta = document.createElement('p');
-      meta.className = 'row-meta';
-      meta.textContent = formatDateTime(item.Timestamp || item.Date);
-      copy.append(title, meta);
-
-      const value = document.createElement('span');
-      value.className = 'row-value';
-      value.textContent = `+${formatNumber(number(item.Points))}`;
-      row.append(copy, value);
-      els.historyList.appendChild(row);
-    });
-  }
-
-  function updateNetworkStatus() {
-    const online = navigator.onLine;
-    els.networkStatus.textContent = online ? 'Online' : 'Offline — actions will sync later';
-    els.networkStatus.classList.toggle('online', online);
-    els.networkStatus.classList.toggle('offline', !online);
-  }
-
-  function updateQueueStatus() {
-    const count = Offline.count();
-    els.queueStatus.textContent = `${count} waiting to sync`;
-    els.queueStatus.classList.toggle('offline', count > 0);
-  }
-
-  function renderLastSynced() {
-    const value = API.getLastSynced();
-    if (!value) {
-      els.lastSynced.textContent = API.getEndpoint() ? 'Not synced yet' : 'Google Sheet not connected';
-      return;
-    }
-    els.lastSynced.textContent = `Last synced ${formatDateTime(value)}`;
-  }
-
-  function getSettings() {
-    return state.app && state.app.settings && typeof state.app.settings === 'object' ? state.app.settings : {};
-  }
-
-  function getSetting(keys, fallback) {
-    const settings = getSettings();
-    for (const key of keys) {
-      if (settings[key] !== undefined && settings[key] !== null && String(settings[key]).trim() !== '') {
-        return settings[key];
-      }
-    }
-    return fallback;
-  }
-
-  function getText(keys, fallback) {
-    const appText = state.app && state.app.appText && typeof state.app.appText === 'object' ? state.app.appText : {};
-    for (const key of keys) {
-      if (appText[key] !== undefined && appText[key] !== null && String(appText[key]).trim() !== '') {
-        return String(appText[key]);
-      }
-    }
-    return fallback;
-  }
-
-  function enabledActions() {
-    const actions = Array.isArray(state.app.actions) ? state.app.actions : [];
-    return actions.filter((action) => !String(action.Enabled || 'Yes').trim().toLowerCase().startsWith('n'));
-  }
-
-  function dailyPointGoal() {
-    const explicit = number(getSetting(['Daily Point Goal', 'Daily Points Goal', 'Daily Goal'], 0));
-    if (explicit > 0) return explicit;
-    const derived = enabledActions().reduce((sum, action) => sum + number(action.Points) * number(action['Daily Goal']), 0);
-    return derived > 0 ? derived : 10;
-  }
-
-  function weeklyPointGoal() {
-    const explicit = number(getSetting(['Weekly Point Goal', 'Weekly Points Goal', 'Weekly Goal'], 0));
-    if (explicit > 0) return explicit;
-    const derived = enabledActions().reduce((sum, action) => sum + number(action.Points) * number(action['Weekly Goal']), 0);
-    return derived > 0 ? derived : dailyPointGoal() * 4;
-  }
-
-  function combinedHistoryRows() {
-    const server = Array.isArray(state.history.actions) ? state.history.actions : [];
-    const serverIds = new Set(server.map((row) => String(row.ID || '')));
-    const pending = Offline.pendingHistoryRows().filter((row) => !serverIds.has(String(row.ID || '')));
-    return [...server, ...pending];
-  }
-
-  function pendingRowsForDate(key) {
-    return Offline.pendingHistoryRows().filter((row) => normalizeDateKey(row.Date || row.Timestamp) === key);
-  }
-
-  function pendingRowsForWeek() {
-    const start = startOfWeek(new Date());
-    const end = new Date(start);
-    end.setDate(end.getDate() + 7);
-    return Offline.pendingHistoryRows().filter((row) => {
-      const d = new Date(row.Timestamp || row.Date);
-      return !Number.isNaN(d.getTime()) && d >= start && d < end;
-    });
-  }
-
-  function calculateStreak() {
-    const goal = number(getSetting(['Successful Day Points', 'Daily Point Goal', 'Daily Points Goal'], dailyPointGoal()));
-    if (goal <= 0) return 0;
-
-    const totals = new Map();
-    combinedHistoryRows().forEach((row) => {
-      const key = normalizeDateKey(row.Date || row.Timestamp);
-      if (!key) return;
-      totals.set(key, (totals.get(key) || 0) + number(row.Points));
-    });
-
-    const rule = String(getSetting(['Streak Rule', 'Streak Rules'], 'Every day')).toLowerCase();
-    const skipWeekends = rule.includes('weekday');
-    let cursor = new Date();
-    cursor.setHours(12, 0, 0, 0);
-
-    if (!isRequiredDay(cursor, skipWeekends)) {
-      cursor = previousRequiredDay(cursor, skipWeekends);
-    }
-
-    const todayMeets = (totals.get(localDateKey(cursor)) || 0) >= goal;
-    if (!todayMeets && localDateKey(cursor) === todayKey()) {
-      cursor = previousRequiredDay(cursor, skipWeekends);
-    }
-
-    let streak = 0;
-    for (let i = 0; i < 366; i += 1) {
-      const key = localDateKey(cursor);
-      if ((totals.get(key) || 0) < goal) break;
-      streak += 1;
-      cursor = previousRequiredDay(cursor, skipWeekends);
-    }
-    return streak;
-  }
-
-  function isRequiredDay(date, skipWeekends) {
-    if (!skipWeekends) return true;
-    const day = date.getDay();
-    return day !== 0 && day !== 6;
-  }
-
-  function previousRequiredDay(date, skipWeekends) {
-    const result = new Date(date);
-    do {
-      result.setDate(result.getDate() - 1);
-    } while (!isRequiredDay(result, skipWeekends));
-    return result;
-  }
-
-  function todayKey() {
-    return localDateKey(new Date());
-  }
-
-  function localDateKey(date) {
-    const d = date instanceof Date ? date : new Date(date);
-    if (Number.isNaN(d.getTime())) return '';
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  }
-
-  function normalizeDateKey(value) {
-    if (!value) return '';
-    const text = String(value);
-    const simple = text.match(/^(\d{4}-\d{2}-\d{2})/);
-    if (simple) return simple[1];
-    return localDateKey(new Date(value));
-  }
-
-  function startOfWeek(date) {
-    const result = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-    const day = result.getDay();
-    const diff = result.getDate() - day + (day === 0 ? -6 : 1);
-    result.setDate(diff);
-    result.setHours(0, 0, 0, 0);
-    return result;
-  }
-
-  function setProgress(element, percent) {
-    const safe = Math.min(100, Math.max(0, percent));
-    element.style.width = `${safe}%`;
-    const track = element.parentElement;
-    if (track) track.setAttribute('aria-valuenow', String(safe));
-  }
-
-  function percentOf(value, goal) {
-    if (goal <= 0) return 0;
-    return Math.min(100, Math.round((value / goal) * 100));
-  }
-
-  function yes(value) {
-    const text = String(value || '').trim().toLowerCase();
-    return ['yes', 'true', 'done', 'complete', 'completed', '1'].includes(text);
-  }
-
-  function number(value) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-
-  function formatNumber(value) {
-    return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(number(value));
-  }
-
-  function dateValue(value) {
-    const d = new Date(value || 0);
-    return Number.isNaN(d.getTime()) ? 0 : d.getTime();
-  }
-
-  function formatDateTime(value) {
-    const d = new Date(value);
-    if (Number.isNaN(d.getTime())) return String(value || '');
-    return new Intl.DateTimeFormat(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit'
-    }).format(d);
-  }
-
-  function humanError(error) {
-    if (!error) return 'Something went wrong.';
-    if (error.code === 'RAPID_TAP') return error.message;
-    if (!navigator.onLine) return 'You are offline. Your saved actions will sync when internet returns.';
-    return error.message || String(error);
-  }
-
-  function showToast(message) {
-    clearTimeout(toastTimer);
-    els.toast.textContent = message;
-    els.toast.classList.add('show');
-    toastTimer = setTimeout(() => els.toast.classList.remove('show'), 2600);
-  }
-})();
+      if (file.size > MAX_BACKUP) throw new ValidationError(['Choose a backup smaller than 8 MB.']);
+      await writes;
+      const expected = store.raw(), restored = parseBackup(await file.text());
+      const view = el('div');
+      if (restored.trackerConfig) summary(restored.trackerConfig, view); else para('This backup contains an unfinished Goal Plan.', view);
+      para(`${restored.actionHistory.length} recorded actions · ${restored.milestoneState.length} completed milestones`, view);
+      if (!await confirmChange('Restore this backup?', 'This replaces the plan and progress in this browser. Save a backup of your current tracker first if you want to keep it.', 'RESTORE THIS BACKUP', view)) return;
+      state = await store.change(() => restored, expected); preview = null; screen = null; $('storageMessage').classList.add('hidden'); render(); toast('Backup restored.');
+    } catch (e) { toast(e instanceof StorageError ? e.message : 'This backup could not be restored. Your current tracker is unchanged. Choose a valid Goal Tracker backup.'); }
+    finally { f.input.value = ''; f.input.disabled = false; }
+  });
+}
+function settings() {
+  title('Your tracker, on your device', 'BACKUP & SETTINGS');
+  const box = card();
+  para('Save a backup to keep your full plan and history or move to another device. Browser data can be removed when you clear site data, use private browsing, or your device frees storage. Keep backups somewhere private.', box);
+  box.append(button('SAVE A BACKUP', async () => { await writes; download(makeBackup(store.read()), `goal-tracker-backup-${dateKey()}.json`); }));
+  restoreControl(box); showLegacyNotice(box);
+  box.append(el('h2', 'Optional install')); para('Use Install app above when available, or your browser’s Install / Add to Home Screen menu. After offline preparation completes, you can use this tracker without internet.', box);
+  if (!navigator.locks) para('For this browser, use one tracker tab at a time so simultaneous edits do not overlap.', box, 'notice');
+  box.append(button('Teacher guide', () => { screen = 'teacher'; render(); }, true), button('BACK', () => { screen = null; render(); }, true));
+  resetControl();
+}
+function resetControl() {
+  const danger = el('section', undefined, 'danger-zone'); danger.append(el('h2', 'Start over'));
+  para('This erases the Goal Tracker and progress stored on this device/browser. Downloaded backups remain wherever you saved them.', danger);
+  danger.append(button('RESET MY TRACKER', async () => {
+    await writes; const expected = store.raw();
+    if (!await confirmChange('Erase this tracker?', 'This erases the Goal Tracker and progress stored on this device/browser, including any earlier tracker data. This cannot be undone without a backup.', 'YES, ERASE MY TRACKER')) return;
+    state = await store.change(() => freshState(), expected);
+    for (const k of LEGACY_KEYS) localStorage.removeItem(k);
+    sessionStorage.removeItem('goalTracker:lastTap:v1');
+    preview = null; screen = null; $('storageMessage').classList.add('hidden'); render(); toast('Tracker reset. You can begin again.');
+  }, true)); main.append(danger);
+}
+function recovery() {
+  title('Let’s keep your saved data safe');
+  para('Your existing data has not been replaced. Keep a recovery copy before choosing a backup or starting over. A recovery copy is the original stored data for troubleshooting; it may need a compatible future app.');
+  if (store) {
+    main.append(button('SAVE RECOVERY COPY', () => download(store.raw() || '{}', 'goal-tracker-recovery.json'), true));
+    restoreControl(main); resetControl();
+  } else para('Enable local storage for this site, then reload to continue.');
+}
+$('toolsButton').addEventListener('click', () => { screen = screen === 'tools' ? null : 'tools'; preview = null; render(); });
+window.addEventListener('storage', e => {
+  if (e.key !== STORAGE_KEY && e.key !== null) return;
+  try { state = store.read(); preview = null; render(false); toast('Updated from another tab.'); }
+  catch (error) { state = null; showStorageError(error); render(); }
+});
+function refreshDate() { if (state?.trackerConfig && renderedDate !== dateKey()) render(false); }
+window.addEventListener('focus', refreshDate);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshDate(); });
+setInterval(refreshDate, 30000);
+render(false);
