@@ -32,7 +32,10 @@ try {
   await page.screenshot({ path: new URL('welcome-mobile.png', output).pathname.replace(/^\/(?=[A-Za-z]:)/, ''), fullPage: true });
   pass('Fresh start, age guidance, keyboard skip link, reduced motion and mobile welcome');
   await click("I'M A TEACHER"); await heading('A small project in student agency'); await click('BACK');
-  await click('BUILD MY TRACKER'); await click("I Don't Know Yet"); await click('GIVE ME IDEAS');
+  await click('BUILD MY TRACKER'); await click("I Don't Know Yet");
+  await heading('What do you want to get better at?');
+  assert.ok((await page.locator('main').innerText()).includes('Examples — use these as a pattern:'));
+  await click('GIVE ME IDEAS');
   assert.ok((await page.locator('main').innerText()).includes('summarize what you read'));
   await page.getByLabel('Your answer', { exact: true }).fill(plan().answers.goal); await click('NEXT');
   await page.getByLabel('Your answer', { exact: true }).fill(plan().answers.why); await click('BACK');
@@ -40,12 +43,16 @@ try {
   await page.reload(); assert.equal(await page.getByLabel('Your answer', { exact: true }).inputValue(), plan().answers.goal);
   await click('NEXT'); assert.equal(await page.getByLabel('Your answer', { exact: true }).inputValue(), plan().answers.why);
   await click('NEXT');
-  for (const key of ['success', 'time', 'actions', 'easy', 'effort']) { await page.getByLabel('Your answer', { exact: true }).fill(plan().answers[key]); await click('NEXT'); }
+  for (const key of ['success', 'time']) { await page.getByLabel('Your answer', { exact: true }).fill(plan().answers[key]); await click('NEXT'); }
+  await heading('What are 2–4 things you could do to improve?');
+  assert.ok((await page.locator('main').innerText()).includes('Write one thing on each line.'));
+  assert.ok((await page.locator('main').innerText()).includes('Examples — use these as a pattern:'));
+  for (const key of ['actions', 'easy', 'effort']) { await page.getByLabel('Your answer', { exact: true }).fill(plan().answers[key]); await click('NEXT'); }
   for (const d of ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']) await page.getByLabel(d, { exact: true }).check();
   await click('NEXT');
   for (const key of ['feel', 'name']) { await page.getByLabel('Your answer', { exact: true }).fill(plan().answers[key]); await click('NEXT'); }
   await heading('Your Goal Plan');
-  pass('Unknown-goal discovery, ten-question builder, Back, draft refresh, schedule and review');
+  pass('Unknown-goal discovery, simple examples, ten-question builder, Back, draft refresh, schedule and review');
   await click('LOOKS GOOD'); await click('COPY MY AI PROMPT');
   const prompt = await page.evaluate(() => navigator.clipboard.readText());
   assert.match(prompt, /Do NOT write HTML/); assert.ok(prompt.includes(plan().answers.goal)); assert.match(prompt, /scheduledDays/);
@@ -100,7 +107,7 @@ try {
   await reopened.setViewportSize({ width: 1280, height: 900 });
   await reopened.screenshot({ path: new URL('today-desktop.png', output).pathname.replace(/^\/(?=[A-Za-z]:)/, ''), fullPage: true });
   assert.equal(await reopened.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-  const assets = new Set(['', 'index.html', 'app.js', 'core.js', 'styles.css', 'pwa.js', 'sw.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png']);
+  const assets = new Set(['', 'index.html', 'app.js', 'student-examples.js', 'core.js', 'styles.css', 'pwa.js', 'sw.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png']);
   for (const r of requests) { assert.equal(r.method, 'GET'); assert.equal(r.body, null); assert.equal(new URL(r.url).origin, new URL(url).origin); assert.ok(assets.has(new URL(r.url).pathname.split('/').pop()), r.url); }
   assert.deepEqual(errors, []);
   pass('Desktop layout, no JavaScript errors, and only local static GET requests with no tracker payloads');
