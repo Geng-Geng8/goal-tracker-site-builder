@@ -1,9 +1,9 @@
 // Change the release whenever any app-shell file changes. Each release is atomic.
-const RELEASE = 'universal-v1-1';
+const RELEASE = 'universal-v1-2';
 const SCOPE = self.registration.scope;
 const PREFIX = `goal-tracker-shell-${encodeURIComponent(new URL(SCOPE).pathname)}-`;
 const CACHE = PREFIX + RELEASE;
-const APP_SHELL = ['./', './index.html', './styles.css?v=1', './app.js?v=1', './core.js', './pwa.js?v=1', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
+const APP_SHELL = ['./', './index.html', './styles.css?v=1', './app.js?v=1', './student-examples.js?v=1', './core.js', './pwa.js?v=1', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 const SHELL_URLS = new Set(APP_SHELL.map(path => new URL(path, SCOPE).href));
 self.addEventListener('install', event => {
   // A failed download rejects installation, leaving the previous shell intact.
